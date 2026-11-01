@@ -1,0 +1,29 @@
+[package]
+name = "fidelity-transfer-hook"
+version = "0.1.0"
+edition = "2021"
+description = "Token-2022 transfer hook enforcing KYC/AML compliance for tokenised US Treasury fund"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "fidelity_transfer_hook"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+anchor-spl  = { version = "0.32.1", features = ["token_2022"] }
+spl-transfer-hook-interface = "0.10"
+spl-tlv-account-resolution  = "0.10"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

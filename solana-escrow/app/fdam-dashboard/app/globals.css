@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+:root {
+  --bg:        #080c14;
+  --surface:   #0e1625;
+  --border:    #1e2d47;
+  --text:      #e2e8f2;
+  --muted:     #64748b;
+  --amber:     #f59e0b;
+  --amber-dim: #78350f;
+  --green:     #10b981;
+  --green-dim: #064e3b;
+  --red:       #ef4444;
+  --red-dim:   #7f1d1d;
+  --blue:      #3b82f6;
+  --blue-dim:  #1e3a5f;
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --font-sans: var(--font-space);
+  --font-mono: var(--font-space-mono);
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-space), 'Space Grotesk', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* Animated entry */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-ring {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+@keyframes scan {
+  0%   { transform: translateY(0%); }
+  100% { transform: translateY(100%); }
+}
+
+.fade-up { animation: fadeUp 0.45s cubic-bezier(0.16,1,0.3,1) both; }
+.fade-up-1 { animation-delay: 0.05s; }
+.fade-up-2 { animation-delay: 0.1s; }
+.fade-up-3 { animation-delay: 0.15s; }
+.fade-up-4 { animation-delay: 0.2s; }
+.fade-up-5 { animation-delay: 0.25s; }
+.fade-up-6 { animation-delay: 0.3s; }
+
+.status-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  animation: pulse-ring 2s ease-in-out infinite;
+}
+
+/* Monospace addresses */
+.addr {
+  font-family: var(--font-space-mono), 'Space Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+/* Section dividers */
+.rule {
+  border: none;
+  border-top: 1px solid var(--border);
+}

@@ -1,0 +1,30 @@
+# Anchor / Solana
+.anchor
+target
+**/*.rs.bk
+test-ledger
+.yarn
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node / JS
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.tsbuildinfo
+
+# Next.js (dashboard)
+app/fdam-dashboard/.next/
+app/fdam-dashboard/out/
+app/fdam-dashboard/build/
+
+# Vercel
+.vercel
+
+# Env
+.env*
+*.pem

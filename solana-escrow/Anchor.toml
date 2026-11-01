@@ -1,0 +1,21 @@
+[toolchain]
+package_manager = "yarn"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+solana_escrow           = "ivVk3oF3Vc6LE2nAtTaRyEa6ceg8V7fkSGEkJ1Bbnv1"
+fidelity_transfer_hook  = "23kV2bhRWCGeyCjZrJHpdnWq9jyjZfP5tJ1JYHWmcAAB"
+kyc_registry            = "7b7KuUqicUcoTSvkdBXdc6KvX4hPyB5DergBsGssURsM"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
