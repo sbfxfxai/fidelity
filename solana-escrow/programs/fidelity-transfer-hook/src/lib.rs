@@ -101,69 +101,68 @@ pub mod fidelity_transfer_hook {
         msg!("FDAM compliance hook: evaluating transfer...");
 
         // ------------------------------------------------------------------
-        // Step 1 — Structural owner check
-        //
-        // Verify the KYC account's on-chain owner is the KYC registry program.
-        // We compare against the COMPILE-TIME constant — not the
-        // `compliance_program` account key — so an attacker cannot inject a
-        // different program ID at runtime.
+        // Shared helper: validate a KYC registry account against a wallet.
+        // Runs the same 4-layer check for both sender and receiver so neither
+        // can bypass the gate, and a revoked sender can't transfer even before
+        // the freeze account instruction lands.
         // ------------------------------------------------------------------
-        require_keys_eq!(
-            *ctx.accounts.receiver_kyc_registry.owner,
-            COMPLIANCE_PROGRAM_ID,
-            HookError::InvalidRegistryOwner
-        );
+        let validate_kyc = |registry: &AccountInfo,
+                             wallet: &Pubkey|
+         -> Result<()> {
+            // Layer 1 — owner must be the hardcoded compliance program constant.
+            require_keys_eq!(
+                *registry.owner,
+                COMPLIANCE_PROGRAM_ID,
+                HookError::InvalidRegistryOwner
+            );
 
-        // ------------------------------------------------------------------
-        // Step 2 — Discriminator + deserialise
-        //
-        // try_deserialize validates the 8-byte Anchor discriminator prefix
-        // before returning data.  A fake account with random bytes fails here.
-        // ------------------------------------------------------------------
-        let data = ctx.accounts.receiver_kyc_registry.try_borrow_data()?;
-        let record = KycRecord::try_deserialize(&mut data.as_ref())
-            .map_err(|_| error!(HookError::RegistryDeserializeFailed))?;
-        // Drop borrow before any further account access
-        drop(data);
+            // Layer 2 — discriminator-validated deserialise.
+            let data = registry.try_borrow_data()?;
+            let record = KycRecord::try_deserialize(&mut data.as_ref())
+                .map_err(|_| error!(HookError::RegistryDeserializeFailed))?;
+            drop(data);
 
-        // ------------------------------------------------------------------
-        // Step 3 — PDA re-derivation using the stored canonical bump
-        //
-        // We use create_program_address (not find_program_address) to save
-        // ~1,000 CU.  This is safe because canonical_bump was read from data
-        // that is already owner-verified and discriminator-validated above.
-        // The PDA is bound to the *wallet owner* of the destination token
-        // account, not the token account address itself — one KYC record per
-        // wallet regardless of how many token accounts they hold.
-        // ------------------------------------------------------------------
+            // Layer 3 — PDA re-derivation using the stored canonical bump.
+            // create_program_address (~500 CU) is safe here because the bump
+            // was read from data whose owner and discriminator are already
+            // verified above.
+            let expected_pda = Pubkey::create_program_address(
+                &[KYC_SEED, wallet.as_ref(), &[record.canonical_bump]],
+                &COMPLIANCE_PROGRAM_ID,
+            )
+            .map_err(|_| error!(HookError::InvalidPdaDerivation))?;
 
-        // .owner on InterfaceAccount<TokenAccount> is the wallet Pubkey (via
-        // Deref to spl_token_2022::state::Account), NOT account_info().owner
-        // which is the Token-2022 program ID.
-        let destination_wallet: &Pubkey = &ctx.accounts.destination_token.owner;
+            require_keys_eq!(
+                *registry.key,
+                expected_pda,
+                HookError::RegistryPdaMismatch
+            );
 
-        let expected_pda = Pubkey::create_program_address(
-            &[KYC_SEED, destination_wallet.as_ref(), &[record.canonical_bump]],
-            &COMPLIANCE_PROGRAM_ID,
-        )
-        .map_err(|_| error!(HookError::InvalidPdaDerivation))?;
+            // Layer 4 — compliance gate.
+            require!(record.is_approved, HookError::WalletNotKycVerified);
 
-        require_keys_eq!(
-            ctx.accounts.receiver_kyc_registry.key(),
-            expected_pda,
-            HookError::RegistryPdaMismatch
-        );
+            Ok(())
+        };
 
-        // ------------------------------------------------------------------
-        // Step 4 — Compliance gate
-        // ------------------------------------------------------------------
-        require!(record.is_approved, HookError::ReceiverNotKycVerified);
+        // Sender check: prevents a revoked holder from initiating a transfer
+        // in the window between flag revocation and freeze_account landing.
+        let source_wallet: Pubkey = ctx.accounts.source_token.owner;
+        validate_kyc(
+            ctx.accounts.sender_kyc_registry.as_ref(),
+            &source_wallet,
+        )?;
+
+        // Receiver check: prevents transfer to an unapproved wallet.
+        let destination_wallet: Pubkey = ctx.accounts.destination_token.owner;
+        validate_kyc(
+            ctx.accounts.receiver_kyc_registry.as_ref(),
+            &destination_wallet,
+        )?;
 
         msg!(
-            "KYC cleared: wallet {} compliance_level={} jurisdiction={:?}",
+            "KYC cleared: sender {} receiver {} — transfer authorised",
+            source_wallet,
             destination_wallet,
-            record.compliance_level,
-            record.jurisdiction,
         );
         Ok(())
     }
@@ -174,37 +173,55 @@ pub mod fidelity_transfer_hook {
     /// an attacker cannot front-run the PDA initialisation and inject their
     /// own account list.
     ///
-    /// Registered extra account slots (appended after the mandatory 4):
-    ///   slot 4: receiver_kyc_registry  (index-seeded: ["kyc_status", acct[2].owner])
-    ///   slot 5: compliance_program     (literal address = COMPLIANCE_PROGRAM_ID)
+    /// Registered extra account slots (appended after the mandatory 5):
+    ///   slot 5: sender_kyc_registry    (seed-resolved: ["kyc_status", acct[0].owner])
+    ///   slot 6: receiver_kyc_registry  (seed-resolved: ["kyc_status", acct[2].owner])
+    ///   slot 7: compliance_program     (literal address = COMPLIANCE_PROGRAM_ID)
     pub fn initialize_extra_account_metas(
         ctx: Context<InitializeExtraAccountMetas>,
     ) -> Result<()> {
-        // Two extra accounts beyond the 4 mandatory ones.
-        // Slot 4: KYC record, derived from destination token account owner (acct index 2).
-        //   ExtraAccountMeta::new_with_seeds uses Token-2022's account-resolution
-        //   protocol: seed type 0x02 = account key at position N in the accounts list.
+        // Mandatory account indices (0-based, as Token-2022 passes them):
+        //   0 = source_token       (owner field at byte offset 32)
+        //   1 = mint
+        //   2 = destination_token  (owner field at byte offset 32)
+        //   3 = authority
+        //   4 = extra_account_metas_list (this PDA)
         let account_metas = vec![
-            // KYC record PDA: seeds = ["kyc_status", destination_token.owner]
-            // destination_token is at mandatory account index 2 (0-based).
-            // The Token-2022 layout stores .owner at byte offset 32 in TokenAccount.
+            // Slot 5 — sender KYC record PDA
+            // seeds = ["kyc_status", source_token.owner]
+            // source_token is account index 0; .owner field is at byte offset 32.
             ExtraAccountMeta::new_with_seeds(
                 &[
                     spl_tlv_account_resolution::seeds::Seed::Literal {
                         bytes: KYC_SEED.to_vec(),
                     },
-                    // Resolve destination_token.owner at execution time.
-                    // account_index 2 = destination_token; data_index 32 = owner field offset.
                     spl_tlv_account_resolution::seeds::Seed::AccountData {
-                        account_index: 2,
+                        account_index: 0, // source_token
+                        data_index:    32, // offset of .owner in TokenAccount layout
+                        length:        32,
+                    },
+                ],
+                false,
+                false,
+            )?,
+            // Slot 6 — receiver KYC record PDA
+            // seeds = ["kyc_status", destination_token.owner]
+            // destination_token is account index 2.
+            ExtraAccountMeta::new_with_seeds(
+                &[
+                    spl_tlv_account_resolution::seeds::Seed::Literal {
+                        bytes: KYC_SEED.to_vec(),
+                    },
+                    spl_tlv_account_resolution::seeds::Seed::AccountData {
+                        account_index: 2, // destination_token
                         data_index:    32,
                         length:        32,
                     },
                 ],
-                false, // not a signer
-                false, // not writable
+                false,
+                false,
             )?,
-            // Compliance program literal address (read-only reference, not CPI target)
+            // Slot 7 — compliance program literal address
             ExtraAccountMeta::new_with_pubkey(
                 &COMPLIANCE_PROGRAM_ID,
                 false,
@@ -213,7 +230,6 @@ pub mod fidelity_transfer_hook {
         ];
 
         let account_size = ExtraAccountMetaList::size_of(account_metas.len())?;
-        // Verify allocated space matches
         require_eq!(
             ctx.accounts.extra_account_metas_list.data_len(),
             account_size,
@@ -242,19 +258,20 @@ pub mod fidelity_transfer_hook {
 /// using the data registered in `initialize_extra_account_metas`.
 #[derive(Accounts)]
 pub struct ExecuteTransfer<'info> {
-    /// Mandatory slot 0 — source token account
+    /// Mandatory slot 0 — source token account.
+    /// .owner (via Deref) is the sender wallet — used for sender KYC derivation.
     pub source_token: InterfaceAccount<'info, TokenAccount>,
 
     /// Mandatory slot 1 — regulated mint
     pub mint: InterfaceAccount<'info, Mint>,
 
     /// Mandatory slot 2 — destination token account.
-    /// .owner (via Deref) is the wallet Pubkey — used for KYC PDA derivation.
+    /// .owner (via Deref) is the receiver wallet — used for receiver KYC derivation.
     pub destination_token: InterfaceAccount<'info, TokenAccount>,
 
     /// Mandatory slot 3 — transfer authority (owner or delegate).
     ///
-    /// Declared as AccountInfo, NOT Signer — the Token-2022 spec does not
+    /// Declared as UncheckedAccount, NOT Signer — the Token-2022 spec does not
     /// guarantee a signature here when a delegate is in use.
     /// CHECK: Passed by Token-2022; not used in hook logic.
     pub authority: UncheckedAccount<'info>,
@@ -267,19 +284,19 @@ pub struct ExecuteTransfer<'info> {
 
     // --- Custom accounts injected via extra-account-metas resolution ---
 
-    /// The KYC record for the destination wallet.
-    /// Owner verified against COMPLIANCE_PROGRAM_ID (hardcoded constant).
-    /// PDA re-derived in body using stored canonical_bump.
-    /// CHECK: Verified in instruction body — owner check + discriminator + PDA derivation.
+    /// Slot 5 — KYC record for the sending wallet.
+    /// Prevents a revoked holder from initiating a transfer before freeze lands.
+    /// CHECK: Owner + discriminator + PDA verified in execute() body.
+    pub sender_kyc_registry: UncheckedAccount<'info>,
+
+    /// Slot 6 — KYC record for the receiving wallet.
+    /// CHECK: Owner + discriminator + PDA verified in execute() body.
     pub receiver_kyc_registry: UncheckedAccount<'info>,
 
-    /// The compliance program whose program ID is the unforgeable owner
-    /// reference for all KYC record accounts.
-    ///
-    /// Included in the accounts list so Token-2022 can pass it for
-    /// `create_program_address` use — but we always compare against the
-    /// hardcoded COMPLIANCE_PROGRAM_ID constant, never this runtime value.
-    /// CHECK: Not used directly in logic; presence confirms it was registered.
+    /// Slot 7 — compliance program literal address.
+    /// We always compare KYC account owners against the hardcoded
+    /// COMPLIANCE_PROGRAM_ID constant, never this runtime value.
+    /// CHECK: Present for account-resolution bookkeeping only.
     pub compliance_program: UncheckedAccount<'info>,
 }
 
@@ -293,6 +310,12 @@ pub struct InitializeExtraAccountMetas<'info> {
     pub mint: InterfaceAccount<'info, Mint>,
 
     /// Caller must be the mint authority to register hook accounts.
+    /// Constraint: key must match mint.mint_authority — prevents any signer
+    /// other than the actual mint authority from initialising the meta list.
+    #[account(
+        constraint = mint.mint_authority.contains(&mint_authority.key())
+            @ HookError::UnauthorizedMetaInit
+    )]
     pub mint_authority: Signer<'info>,
 
     /// The extra account metas list PDA for this mint.
@@ -304,7 +327,7 @@ pub struct InitializeExtraAccountMetas<'info> {
     #[account(
         init,
         payer = payer,
-        space = ExtraAccountMetaList::size_of(2).unwrap(),
+        space = ExtraAccountMetaList::size_of(3).unwrap(),
         seeds = [b"extra-account-metas", mint.key().as_ref()],
         bump,
     )]
@@ -325,10 +348,12 @@ pub enum HookError {
     RegistryDeserializeFailed,
     #[msg("PDA re-derivation failed — canonical_bump is invalid.")]
     InvalidPdaDerivation,
-    #[msg("KYC registry PDA does not match the derivation for this receiver wallet.")]
+    #[msg("KYC registry PDA does not match the derivation for this wallet.")]
     RegistryPdaMismatch,
-    #[msg("Receiver wallet has not cleared KYC/AML compliance.")]
-    ReceiverNotKycVerified,
+    #[msg("Wallet has not cleared KYC/AML compliance.")]
+    WalletNotKycVerified,
     #[msg("Extra account metas list allocated space does not match required size.")]
     MetaListSizeMismatch,
+    #[msg("Signer is not the mint authority for this regulated mint.")]
+    UnauthorizedMetaInit,
 }

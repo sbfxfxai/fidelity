@@ -2,6 +2,22 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 // ---------------------------------------------------------------------------
+// Condition program ID
+//
+// SECURITY: This must be hardcoded, not accepted at runtime.
+// Accepting `condition_program` as a runtime UncheckedAccount and comparing
+// `external_condition_state.owner == condition_program.key()` is a spoofing
+// vector: an attacker passes their own program as both accounts and satisfies
+// the owner check trivially.
+//
+// In production, set this to the deployed address of the external escrow
+// condition program. Any change requires a governance-approved redeploy of
+// this binary.
+// ---------------------------------------------------------------------------
+pub const CONDITION_PROGRAM_ID: Pubkey =
+    pubkey!("ivVk3oF3Vc6LE2nAtTaRyEa6ceg8V7fkSGEkJ1Bbnv1"); // self-referential for local tests
+
+// ---------------------------------------------------------------------------
 // External program state layout
 // ---------------------------------------------------------------------------
 
@@ -99,11 +115,13 @@ pub mod solana_escrow {
         require!(amount > 0, EscrowError::ZeroAmount);
 
         // --- Cross-program state check -----------------------------------------
-        // Step 1: verify that the condition account is actually owned by Program B.
-        //         This prevents a spoofed account initialised by any other program.
-        require!(
-            ctx.accounts.external_condition_state.owner
-                == &ctx.accounts.condition_program.key(),
+        // Step 1: verify that the condition account is owned by the hardcoded
+        //         CONDITION_PROGRAM_ID constant — not the runtime account key.
+        //         This prevents the attack where an attacker passes their own
+        //         program as both external_condition_state owner and condition_program.
+        require_keys_eq!(
+            *ctx.accounts.external_condition_state.owner,
+            CONDITION_PROGRAM_ID,
             EscrowError::InvalidConditionOwner
         );
 
@@ -330,10 +348,12 @@ pub struct ConditionalWithdraw<'info> {
     /// validated by `ExternalConditionAccount::try_deserialize` in instruction body.
     pub external_condition_state: UncheckedAccount<'info>,
 
-    /// The external program whose account we are reading.
-    /// Passing it as a `Program` account lets Anchor verify it is executable.
+    /// The external program reference — present only for account-resolution
+    /// bookkeeping. The actual owner comparison in the instruction body uses
+    /// the hardcoded CONDITION_PROGRAM_ID constant, not this runtime key.
     ///
-    /// CHECK: Verified to be executable by the `Program` wrapper.
+    /// CHECK: Not used in the owner comparison; CONDITION_PROGRAM_ID is the
+    /// authoritative value.
     pub condition_program: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
